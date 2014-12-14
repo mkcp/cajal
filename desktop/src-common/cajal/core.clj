@@ -1,131 +1,86 @@
 (ns cajal.core
-  (:require [play-clj.core :refer :all]
+  (:require [cajal.camera :as c]
+            [cajal.util :as u]
+            [cajal.entity :as e]
+            [clojure.pprint :refer :all]
+            [play-clj.core :refer :all]
             [play-clj.g2d :refer :all]
             [play-clj.ui :refer :all]))
 
-;; Physics constants
-(def gravity 800)
-(def acceleration 10)
-(def max-jump-velocity 24)
-(def gravity -1.5)
-(def deceleration 0.9)
+(declare cajal main-screen fps-screen)
 
-;; This should probably be stored on the screen-map
-(def conditions (atom {:min-speed 100 :max-speed 200}))
+(def loss-velocity (atom 3))
+(def loss-acceleration 0.003)
+(def win-velocity 200)
 
-(defn create-player [image x y]
-  (assoc image
-    :player? true
-    :x x
-    :y y
-    :x-velocity 0
-    :y-velocity 0
-    :x-change 0
-    :y-change 0
-    :can-jump? false
-    :jump-sound (sound "jump.wav")))
+(defn increase-loss-velocity []
+  (swap! loss-velocity (+ loss-velocity loss-acceleration)))
 
-(defn touched? [key]
-  (and (game :touched?)
-       (case key
-         :down (> (game :y) (* (game :height) (/ 2 3)))
-         :up (< (game :y) (/ (game :height) 3))
-         :left (< (game :x) (/ (game :width) 3))
-         :right (> (game :x) (* (game :width) (/ 2 3)))
-         false)))
+(defn win? [{:keys [x-velocity]}] (<= x-velocity win-velocity))
+(defn lose? [{:keys [x-velocity]}] (<= x-velocity loss-velocity))
 
-;; FIXME
-(defn get-touching-tile [])
+(defn reset-screen! [] (on-gl (set-screen! cajal main-screen fps-screen)))
+(defn out-of-bounds? [y height] (< y (- height)))
 
-;; FIXME Accelerate constantly
-#_(defn get-x-velocity [{:keys [player? x-velocity]}]
+(defn update-screen!
+  "Used in the render function to focus the camera on the player and reset
+  the screen if the player goes out of bounds."
+  [screen entities]
+  (doseq [{:keys [x y height player? x-velocity]} entities]
     (if player?
-      (cond
-       (or (key-pressed? :dpad-left (touched? :left))))
-      x-velocity))
-
-(defn get-y-velocity [{:keys [player? y-velocity can-jump?]}]
-  (if player?
-    (cond (and can-jump? (or (key-pressed? :dpad-up) (touched? :up)))
-          max-jump-velocity
-          :else
-          y-velocity)
-    y-velocity))
-
-(defn move
-  "The player should constantly accelerate to the right"
-  [{:keys [delta-time]} {:keys [x y can-jump?] :as entity}]
-  (let [x-velocity #_(get-x-velocity entity)
-        x-velocity (get-x-velocity entity)
-        x-change (* x-velocity delta-time)
-        y-change (* y-velocity delta-time)]))
-
-(defn prevent-move
-  "Stops the player when she collides with wall tiles"
-  [screen {:keys [x y x-change y-change] :as entity}]
-  (let [old-x (- x x-change)
-        old-y (- y y-change)
-        entity-x (assoc entity :y old-y) ;; These are flipped, why?
-        entity-y (assoc entity :x old-x) ;; These are flipped?
-        up? (> y-change 0)]
-    (merge entity
-           (when (get-touching-tile screen entity-x "walls")
-             {:x-velocity 0 :x-change 0 :x old-x})
-           (when-let [tile (get-touching-tile screen entity-y "walls")]
-             {:y-velocity 0 :y-change 0 :y old-y :can-jump? (not up?)}))))
-
-;; FIXME
-(defn accelerate
-  "Increases the player's x-velocity by the level's default acceleration"
-  [screen entity]
-  (if (:player? entity)
-    (let [x-velocity (:x-velocity entity)]
-      (assoc entity
-        :x-velocity (+ acceleration x-velocity)))
-    entity))
-
-;; FIXME
-(defn slow [x-velocity deceleration] (- x-velocity deceleration))
-
-;; TODO Check that the bounds of the X of primary contacts the bounds of the other. I really gotta look this shit up
-(defn touching?
-  "If the first entity is touching hte second entity, return the second entity. Otherwise return nil."
-  [primary secondary]
-  (if primary
-    secondary
-    nil))
-
-;; FIXME
-(defn player-collide
-  "The player should slow down on collision with an obstacle"
-  [screen entity entities]
-  (if (and (touching? entity entities)
-           (:player? entity))
-     entity))
+      (do (c/move-camera! screen x y)
+          (when (or (out-of-bounds? y height)
+                    (win? x-velocity)
+                    (lose? x-velocity))
+            (reset-screen!)))
+      entities))
+  entities)
 
 (defscreen main-screen
   :on-show
   (fn [screen entities]
-    (update! screen :renderer (stage))
-    [(create-player (texture "runner.png")
-                    10
-                    10)])
+    (update! screen
+             :camera (orthographic)
+             :renderer (orthogonal-tiled-map "cajal-tilemap.tmx" (/ 1 u/pixels-per-tile)))
+    [(e/make-player (texture "runner.png") 0 2)
+     (e/spawn-obstacle :rock)])
 
-  ;; FIXME
   :on-render
   (fn [screen entities]
     (clear! (/ 135 255) (/ 206 255) (/ 235 255) 100)
-
     (->> entities
          (map (fn [entity]
                 (->> entity
-                     ;; FIXME
-                     #_(accelerate screen)
-                     #_(player-collide screen entities)
-                     (move screen)
-                     (prevent-move screen)
-                     )))
-         (render! screen))))
+                     (e/move screen)
+                     (e/prevent-move screen))))
+         e/play-sounds!
+         (render! screen)
+         (update-screen! screen)))
+
+  :on-resize
+  (fn [screen entities]
+    (height! screen u/vertical-tiles)))
+
+(defscreen fps-screen
+  :on-show
+  (fn [screen entities]
+    (update! screen :camera (orthographic) :renderer (stage))
+    [(assoc (label "0" (color :white))
+            :id :fps
+            :x 5)])
+
+  :on-render
+  (fn [screen entities]
+    (render! screen
+             (for [entity entities]
+               (case (:id entity)
+                 :fps (doto entity (label! :set-text (str (game :fps))))
+                 entity))))
+
+  :on-resize
+  (fn [{:keys [width height] :as screen} entities]
+    (height! screen (:height screen))
+    nil))
 
 (defscreen blank-screen
   :on-render
@@ -135,9 +90,21 @@
 (defgame cajal
   :on-create
   (fn [this]
-    (set-screen! this main-screen)))
+    (set-screen! this main-screen fps-screen)))
 
+;; Repl helpers
+(defn reload!
+  "Reimports namespaces and resets the game"
+  []
+  (do
+    (require 'cajal.camera
+             'cajal.util
+             'cajal.entity
+             'cajal.core
+             :reload)
+    (reset-screen!)))
 
+;; Catches exceptions, clears screen, and prints the result
 (set-screen-wrapper! (fn [screen screen-fn]
                        (try (screen-fn) (catch Exception e
                                           (.printStackTrace e)
